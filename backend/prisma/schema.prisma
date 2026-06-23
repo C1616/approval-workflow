@@ -1,0 +1,122 @@
+// Prisma schema for the Submission & Approval Workflow assignment.
+//
+// Design notes (see README for the full write-up):
+// - Status is a Postgres enum, not a free-text string, so the database
+//   itself rejects any value outside the defined state machine.
+// - AuditLog is append-only: every transition writes one row capturing
+//   who made the change, the old/new status, an optional comment, and a
+//   timestamp. Rows are never updated or deleted by the application.
+// - Role is modeled as an enum on User rather than a separate
+//   roles/permissions table, since the brief only requires two fixed
+//   roles. This is a deliberate scope trade-off (documented in README).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  APPLICANT
+  REVIEWER
+}
+
+enum ApplicationStatus {
+  DRAFT
+  SUBMITTED
+  UNDER_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum ApplicationCategory {
+  EXPENSE
+  LEAVE
+  EQUIPMENT
+  TRAVEL
+  OTHER
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         Role
+  createdAt    DateTime @default(now())
+
+  applications  Application[]  @relation("ApplicantApplications")
+  auditEntries  AuditLog[]     @relation("AuditActor")
+  notifications Notification[]
+
+  @@map("users")
+}
+
+model Application {
+  id          String              @id @default(uuid())
+  title       String
+  category    ApplicationCategory
+  description String?
+  amount      Decimal?            @db.Decimal(12, 2)
+  dueDate     DateTime?
+  attachmentPath String?
+  attachmentName String?
+
+  status      ApplicationStatus @default(DRAFT)
+
+  applicantId String
+  applicant   User   @relation("ApplicantApplications", fields: [applicantId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs     AuditLog[]
+  notifications Notification[]
+
+  @@index([applicantId])
+  @@index([status])
+  @@map("applications")
+}
+
+// Append-only audit trail. One row per transition attempt that the
+// service layer commits (illegal transitions are rejected before any
+// row is written here - this table only records transitions that
+// actually happened).
+model AuditLog {
+  id            String            @id @default(uuid())
+  applicationId String
+  application   Application       @relation(fields: [applicationId], references: [id])
+
+  actorId String
+  actor   User   @relation("AuditActor", fields: [actorId], references: [id])
+
+  fromStatus ApplicationStatus
+  toStatus   ApplicationStatus
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  @@index([applicationId])
+  @@map("audit_logs")
+}
+
+// In-app notification, persisted so the bell + unread count survive page
+// reloads and new sessions. Created server-side whenever performTransition
+// commits a transition - never created or mutated directly by the client.
+model Notification {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  applicationId String?
+  application   Application? @relation(fields: [applicationId], references: [id])
+
+  message String
+  isRead  Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead])
+  @@map("notifications")
+}
